@@ -738,9 +738,57 @@ class TestFordLongitudinalSafety(TestFordLongitudinalSafetyBase):
     self.packer = CANPackerSafety("ford_lincoln_base_pt")
     self.safety = libsafety_py.libsafety
     self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
-    # Make sure we enforce long safety even without long flag for CAN
+    # BluePilot: upstream makes openpilot longitudinal the default on CAN and this class passed 0
+    # to prove long safety is enforced without the flag. That is not BluePilot's contract: the
+    # alpha longitudinal toggle is authoritative on every Ford platform, and
+    # sunnypilot/car/ford/interfaces_ext.py explicitly CLEARS FordSafetyFlags.LONG_CONTROL when it
+    # is off, because stock ACC stays in charge and openpilot only nudges the set speed through
+    # ICBM cruise-button presses (sunnypilot/car/ford/icbm.py). So on CAN the openpilot
+    # longitudinal configuration is the flag being set -- that is what this class must exercise.
+    # TestFordCANStockLongitudinalSafety below covers the flag-clear (stock ACC) configuration.
+    self.safety.set_safety_hooks(CarParams.SafetyModel.ford, FordSafetyFlags.LONG_CONTROL)
+    self.safety.init_tests()
+
+
+class TestFordCANStockLongitudinalSafety(TestFordSafetyBase):
+  """BluePilot: CAN/Q3 Ford with the alpha longitudinal toggle off -- stock Ford ACC drives
+  longitudinal and openpilot adjusts the set speed with ICBM button presses in Steering_Data_FD1,
+  never with ACCDATA. interfaces_ext.py clears FordSafetyFlags.LONG_CONTROL in that mode, so
+  ford_init must select the stock TX set. ACCDATA must then be un-transmittable, must stay
+  forwardable from the camera, and must not arm relay malfunction -- if any of those flipped,
+  stock ACC would lose its command path or relay_malfunction would block all TX. The inherited
+  CarSafetyTest matrix (test_tx_hook / test_fwd_hook / test_relay_malfunction) asserts all three
+  from the constants below."""
+  STEER_MESSAGE = MSG_LateralMotionControl
+
+  TX_MSGS = [
+    [MSG_Steering_Data_FD1, 0], [MSG_Steering_Data_FD1, 2], [MSG_ACCDATA_3, 0], [MSG_Lane_Assist_Data1, 0],
+    [MSG_LateralMotionControl, 0], [MSG_IPMA_Data, 0],
+  ]
+  RELAY_MALFUNCTION_ADDRS = {0: (MSG_ACCDATA_3, MSG_Lane_Assist_Data1, MSG_LateralMotionControl,
+                                 MSG_IPMA_Data)}
+
+  FWD_BLACKLISTED_ADDRS = {2: [MSG_ACCDATA_3, MSG_Lane_Assist_Data1, MSG_LateralMotionControl,
+                               MSG_IPMA_Data]}
+
+  def setUp(self):
+    self.packer = CANPackerSafety("ford_lincoln_base_pt")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(CarParams.SafetyModel.ford, 0)
     self.safety.init_tests()
+
+  def test_accdata_not_transmittable(self):
+    # openpilot must not be able to command longitudinal at all in this mode
+    values = {"AccPrpl_A_Rq": 0., "AccPrpl_A_Pred": 0., "AccBrkTot_A_Rq": 0.,
+              "AccBrkPrchg_B_Rq": 0, "AccBrkDecel_B_Rq": 0, "CmbbDeny_B_Actl": 0}
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      self.assertFalse(self._tx(self.packer.make_can_msg_safety("ACCDATA", 0, values)))
+
+  def test_stock_accdata_still_reaches_the_car(self):
+    # the stock camera's ACCDATA must be forwarded, otherwise stock ACC is dead
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, MSG_ACCDATA))
 
 
 class TestFordCANFDLongitudinalSafety(TestFordLongitudinalSafetyBase):
