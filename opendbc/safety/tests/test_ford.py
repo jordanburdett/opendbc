@@ -6,10 +6,10 @@ import unittest
 import opendbc.safety.tests.common as common
 # BluePilot: MAX_LATERAL_ACCEL here is the CAN FD limit from the carcontroller (~2.4 m/s^2,
 # ISO minus the roll term), which is what ford.h's limit_lateral_acceleration path enforces.
-# Upstream's lateral.MAX_LATERAL_ACCEL is a different value (~3.6, ISO plus roll) and applies
-# only to the ISO-only curvature path BluePilot does not use; it is aliased, not shadowed.
+# Upstream's lateral.MAX_LATERAL_ACCEL/MAX_LATERAL_JERK (~3.6, ISO plus roll) belong to the
+# ISO-only curvature path BluePilot does not use -- ford.h sets use_rate_lookup instead -- so they
+# are deliberately not imported here. See CURVATURE_RATE_LOOKUP_* below.
 from opendbc.car.ford.carcontroller import MAX_LATERAL_ACCEL
-from opendbc.car.lateral import MAX_LATERAL_ACCEL as ISO_MAX_LATERAL_ACCEL, MAX_LATERAL_JERK
 from opendbc.car.ford.values import CAR, FordFlags, FordSafetyFlags
 from opendbc.car.interfaces import scale_tire_stiffness
 from opendbc.car.vehicle_model import VehicleModel, calc_slip_factor
@@ -91,7 +91,21 @@ class TestFordSafetyBase(common.CarSafetyTest):
   MAX_CURVATURE = 0.02 # rad/m, 1000 CAN units
   MAX_CURVATURE_ERROR = 0.002         # rad/m, 100 CAN units
   CURVATURE_ERROR_MIN_SPEED = 10.0    # m/s
-  LATERAL_FREQUENCY = 20              # Hz, for per-frame jerk limit
+  LATERAL_FREQUENCY = 20              # Hz, message rate
+
+  # BluePilot: ford.h sets use_rate_lookup, so the per-frame curvature rate limit comes from these
+  # measured tables (curvature_rate_up/down_lookup in the FORD_LIMITS macro), NOT from upstream's
+  # ISO lateral-jerk formula. The two differ enormously at low speed -- at 2 m/s the ISO formula
+  # permits ~0.18 rad/m of curvature change per frame while the table permits 0.0025 -- so the
+  # ISO-derived expectations these helpers used to carry demanded that safety allow steps it
+  # rightly blocks. Up and down tables are identical in ford.h, so one copy is enough.
+  CURVATURE_RATE_LOOKUP_BP = (5., 16., 25.)
+  CURVATURE_RATE_LOOKUP_V = (0.0025, 0.0014, 0.00018)
+  # safety_interpolate() runs in float32 and the speed the safety sees is the DBC-quantized one,
+  # so a boundary computed here can land one CAN unit either side of the safety's. Boundary probes
+  # below step out by this much before asserting, which still pins each limit to within 2 CAN units
+  # (4e-5 rad/m).
+  RATE_LIMIT_TOL_CAN = 1
 
   cnt_speed = 0
   cnt_speed_2 = 0
@@ -103,32 +117,44 @@ class TestFordSafetyBase(common.CarSafetyTest):
 
   # BluePilot: retained from pre-sync. ford.h applies the lateral-accel cap only where
   # limit_lateral_acceleration is set (CAN FD / Q4), not on CAN / Q3 as upstream's ISO-only
-  # curvature path does, so the expectation stays bus-dependent. See FORD_LIMITS in ford.h.
-  def get_canfd_curvature_limits(self, speed):
-    # Round it in accordance with the safety
-    curvature_accel_limit = MAX_LATERAL_ACCEL / (max(speed, 1) ** 2)
-    curvature_accel_limit_lower = int(curvature_accel_limit * self.DEG_TO_CAN - 1) / self.DEG_TO_CAN
-    curvature_accel_limit_upper = int(curvature_accel_limit * self.DEG_TO_CAN + 1) / self.DEG_TO_CAN
-    return curvature_accel_limit_lower, curvature_accel_limit_upper
+  # curvature path does, so every lateral-accel expectation stays bus-dependent.
+  # See FORD_LIMITS in ford.h -- and the report note on the missing Q3 cap.
+  @property
+  def limit_lateral_accel(self):
+    return self.STEER_MESSAGE == MSG_LateralMotionControl2
+
+  def _max_curvature_allowed_can(self, speed):
+    """The largest curvature safety will accept at this speed, in CAN units."""
+    max_curvature_can = round(self.MAX_CURVATURE * self.DEG_TO_CAN)
+    if not self.limit_lateral_accel:
+      return max_curvature_can
+    return min(self._get_max_curvature_can(speed), max_curvature_can)
 
   def _get_max_curvature_can(self, speed):
     fudged_speed = max(speed - 1.0, 1.0)
     return int(MAX_LATERAL_ACCEL / (fudged_speed * fudged_speed) * self.DEG_TO_CAN) + 1
 
+  def _curvature_rate_lookup(self, speed):
+    # mirrors safety_interpolate() in helpers.h: clamped piecewise-linear interp, float32 like the C
+    return float(np.interp(np.float32(speed), self.CURVATURE_RATE_LOOKUP_BP, self.CURVATURE_RATE_LOOKUP_V))
+
   def _get_max_curvature_delta_can(self, speed):
-    fudged_speed = max(speed - 1.0, 1.0)
-    return int(MAX_LATERAL_JERK / (fudged_speed * fudged_speed) / self.LATERAL_FREQUENCY * self.DEG_TO_CAN) + 1
+    # safety fudges the speed down by 1 m/s so its rate limit sits slightly above openpilot's
+    return int(self._curvature_rate_lookup(speed - 1.0) * self.DEG_TO_CAN) + 1
 
   def _get_max_curvature_delta_relaxed_can(self, speed):
     # flipped fudge, this is the least movement toward the error bounds safety requires
-    fudged_speed = speed + 1.0
-    return int(MAX_LATERAL_JERK / (fudged_speed * fudged_speed) / self.LATERAL_FREQUENCY * self.DEG_TO_CAN) - 1
+    return int(self._curvature_rate_lookup(speed + 1.0) * self.DEG_TO_CAN) - 1
 
   def _get_max_curvature_relaxed_can(self, speed):
-    # flipped fudge, safety never requires commanding more curvature than openpilot can send
-    fudged_speed = speed + 1.0
-    max_curvature_accel_can = int(MAX_LATERAL_ACCEL / (fudged_speed * fudged_speed) * self.DEG_TO_CAN) - 1
-    return min(max_curvature_accel_can, round(self.MAX_CURVATURE * self.DEG_TO_CAN))
+    # The most safety can ever require the command to move toward measured. BluePilot's
+    # use_rate_lookup branch clamps the required movement to the curvature signal range only
+    # (SAFETY_CLAMP to +/-max_curvature in lateral.h); unlike upstream's ISO branch it does NOT
+    # additionally clamp to the lateral acceleration cap, so above that cap the requirement and the
+    # cap can disagree. That divergence is reported separately -- it is a false-positive (blocked
+    # message) risk, never a permissive one, so this test asserts the implemented bound.
+    del speed
+    return round(self.MAX_CURVATURE * self.DEG_TO_CAN)
 
   def _set_prev_desired_angle(self, t):
     t = round(t * self.DEG_TO_CAN)
@@ -139,6 +165,12 @@ class TestFordSafetyBase(common.CarSafetyTest):
       self._rx(self._speed_msg(speed))
       self._rx(self._speed_msg_2(speed))
       self._rx(self._yaw_rate_msg(curvature, speed))
+
+  def _meas_tol_can(self, speed):
+    # CAN-unit uncertainty between the curvature _reset_curvature_measurement was asked for and the
+    # one safety ends up holding. Zero on the yaw path; the pinion path quantizes to 0.1 deg.
+    del speed
+    return 0
 
   # Driver brake pedal
   def _user_brake_msg(self, brake: bool):
@@ -302,10 +334,10 @@ class TestFordSafetyBase(common.CarSafetyTest):
         self.assertEqual(self.safety.get_curvature_meas_max(), 0)
 
   def test_max_lateral_acceleration(self):
-    # Ford CAN FD can achieve a higher max lateral acceleration than CAN so we limit curvature based on speed
-    max_curvature_can = round(self.MAX_CURVATURE * self.DEG_TO_CAN)
+    # Ford CAN FD can achieve a higher max lateral acceleration than CAN so we limit curvature based
+    # on speed. On CAN the only bound is the curvature signal range -- see limit_lateral_accel.
     for speed in np.arange(0, 40, 0.5):
-      max_can = min(self._get_max_curvature_can(speed), max_curvature_can)
+      max_can = self._max_curvature_allowed_can(speed)
       for offset in (-5, -1, 0, 1, 5):
         curvature_can = max_can + offset
         curvature = curvature_can / self.DEG_TO_CAN
@@ -327,30 +359,48 @@ class TestFordSafetyBase(common.CarSafetyTest):
 
     for speed in (self.CURVATURE_ERROR_MIN_SPEED - 1,
                   self.CURVATURE_ERROR_MIN_SPEED + 1):
-      _, curvature_accel_limit_upper = self.get_canfd_curvature_limits(speed)
+      max_curvature = self._max_curvature_allowed_can(speed) / self.DEG_TO_CAN
       for controls_allowed in (True, False):
         for steer_control_enabled in (True, False):
           for path_offset in path_offsets:
             for path_angle in path_angles:
               for curvature_rate in curvature_rates:
                 for curvature in curvatures:
+                  def msg(enabled=steer_control_enabled, po=path_offset, pa=path_angle,
+                          c=curvature, cr=curvature_rate):
+                    return self._lat_ctl_msg(enabled, po, pa, c, cr)
+
+                  self._reset_curvature_measurement(curvature, speed)
+                  # BluePilot: path_offset, path_angle and curvature_rate each carry their own
+                  # rate-of-change limit, so a value that steps from the previous sweep iteration
+                  # would be blocked on the transition frame alone. Send the frame once to settle
+                  # those limiters, then assert on an identical frame -- this test is about the
+                  # value ranges, the rate limits are covered by test_curvature_rate_limits.
+                  self.safety.set_controls_allowed(controls_allowed)
+                  self._tx(msg())
                   self.safety.set_controls_allowed(controls_allowed)
                   self._set_prev_desired_angle(curvature)
-                  self._reset_curvature_measurement(curvature, speed)
 
-                  should_tx = path_offset == 0 and path_angle == 0 and curvature_rate == 0
-                  # when request bit is 0, only allow curvature of 0 since the signal range
-                  # is not large enough to enforce it tracking measured
-                  should_tx = should_tx and (controls_allowed if steer_control_enabled else curvature == 0)
-
-                  # BluePilot: only CAN FD has the max lateral acceleration limit (see get_canfd_curvature_limits)
-                  if self.STEER_MESSAGE == MSG_LateralMotionControl2:
-                    should_tx = should_tx and abs(curvature) <= curvature_accel_limit_upper
+                  if steer_control_enabled:
+                    # BluePilot: unlike upstream, openpilot drives path_offset, path_angle and
+                    # curvature_rate as real signals -- they are bounded, not pinned to zero.
+                    # Limits mirror FORD_PATH_OFFSET/PATH_ANGLE/CURVATURE_RATE_MIN/MAX in ford.h.
+                    # angle_mode_engaged is not set here, so path_angle keeps its tight cap.
+                    should_tx = (controls_allowed and
+                                 -1.0 <= path_offset <= 1.0 and
+                                 -0.25 <= path_angle <= 0.25 and
+                                 -0.001024 <= curvature_rate <= 0.00102375 and
+                                 abs(curvature) <= max_curvature)
+                  else:
+                    # when the request bit is 0 every lateral signal must sit at its neutral value;
+                    # the signal ranges are not large enough to enforce them tracking measured
+                    should_tx = (path_offset == 0 and path_angle == 0 and
+                                 curvature_rate == 0 and curvature == 0)
 
                   with self.subTest(controls_allowed=controls_allowed, steer_control_enabled=steer_control_enabled,
                                     path_offset=float(path_offset), path_angle=float(path_angle), curvature_rate=float(curvature_rate),
                                     curvature=float(curvature)):
-                    self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(steer_control_enabled, path_offset, path_angle, curvature, curvature_rate)))
+                    self.assertEqual(should_tx, self._tx(msg()))
 
   def test_curvature_rate_limits(self):
     """
@@ -360,49 +410,54 @@ class TestFordSafetyBase(common.CarSafetyTest):
     self.safety.set_controls_allowed(True)
     # safety fudges the speed (1 m/s) and rate limits (1 CAN unit) to avoid false positives
     small_curvature = 1 / self.DEG_TO_CAN  # significant small amount of curvature to cross boundary
+    # step this far past each boundary before asserting, see RATE_LIMIT_TOL_CAN
+    tol = self.RATE_LIMIT_TOL_CAN / self.DEG_TO_CAN
 
     for speed in np.arange(0, 40, 0.5):
-      curvature_accel_limit = self._get_max_curvature_can(speed) / self.DEG_TO_CAN
+      curvature_accel_limit = self._max_curvature_allowed_can(speed) / self.DEG_TO_CAN
       limit_command = speed > self.CURVATURE_ERROR_MIN_SPEED
       # ensure our limits match the safety's rounded limits
-      # lateral jerk is symmetric, so the wind up and wind down limits are the same
+      # the wind up and wind down tables are identical in ford.h, so the limits are symmetric
       max_delta = self._get_max_curvature_delta_can(speed) / self.DEG_TO_CAN
       max_delta_relaxed = self._get_max_curvature_delta_relaxed_can(speed) / self.DEG_TO_CAN
 
+      # the error band edge sits at (measured - MAX_CURVATURE_ERROR), so it moves with any
+      # uncertainty in the measurement -- step clear of it in both directions
+      meas_tol = self._meas_tol_can(speed) * small_curvature
+      band_inside = self.MAX_CURVATURE_ERROR - small_curvature + meas_tol
+      band_outside = self.MAX_CURVATURE_ERROR - small_curvature * 2 - meas_tol
+
       up_cases = (self.MAX_CURVATURE_ERROR * 2, [
         (not limit_command, 0, 0),
-        (not limit_command, 0, max_delta_relaxed - small_curvature),
-        (True, 0, max_delta_relaxed),
-        (True, 0, max_delta),
-        (False, 0, max_delta + small_curvature),
+        (not limit_command, 0, max_delta_relaxed - tol - small_curvature),
+        (True, 0, max_delta_relaxed + tol),
+        (True, 0, max_delta - tol),
+        (False, 0, max_delta + tol + small_curvature),
         # stay at boundary limit
-        (True, self.MAX_CURVATURE_ERROR - small_curvature, self.MAX_CURVATURE_ERROR - small_curvature),
-        # 1 unit below boundary limit
-        (not limit_command, self.MAX_CURVATURE_ERROR - small_curvature * 2, self.MAX_CURVATURE_ERROR - small_curvature * 2),
+        (True, band_inside, band_inside),
+        # below boundary limit
+        (not limit_command, band_outside, band_outside),
         # shouldn't allow command to move outside the boundary limit if last was inside
-        (not limit_command, self.MAX_CURVATURE_ERROR - small_curvature, self.MAX_CURVATURE_ERROR - small_curvature * 2),
+        (not limit_command, band_inside, band_outside),
       ])
 
       down_cases = (self.MAX_CURVATURE - self.MAX_CURVATURE_ERROR * 2, [
         (not limit_command, self.MAX_CURVATURE, self.MAX_CURVATURE),
-        (not limit_command, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta_relaxed + small_curvature),
-        (True, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta_relaxed),
-        (True, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta),
-        (False, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta - small_curvature),
+        (not limit_command, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta_relaxed + tol + small_curvature),
+        (True, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta_relaxed - tol),
+        (True, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta + tol),
+        (False, self.MAX_CURVATURE, self.MAX_CURVATURE - max_delta - tol - small_curvature),
       ])
 
-      # the driver can hold a curvature openpilot may not command, safety must never require moving past
-      # the most it can send: the lower of the lateral acceleration limit and what the EPS accepts
+      # the driver can hold a curvature openpilot may not command, safety must never require moving
+      # past the most it can send -- on this path that is the curvature signal range itself
       max_curvature_relaxed = self._get_max_curvature_relaxed_can(speed) / self.DEG_TO_CAN
-      # safety fudges the speed down for the accel check and up for the cap, so the last command can sit above the cap
-      max_curvature_allowed_can = min(self._get_max_curvature_can(speed), round(self.MAX_CURVATURE * self.DEG_TO_CAN))
-      winds_down_within_jerk = (max_curvature_allowed_can - self._get_max_curvature_relaxed_can(speed) <=
-                                self._get_max_curvature_delta_can(speed))
+      max_curvature_allowed_can = round(self.MAX_CURVATURE * self.DEG_TO_CAN)
       relaxed_cases = (self.MAX_CURVATURE * 2, [
         (True, max_curvature_relaxed, max_curvature_relaxed),
         (not limit_command, max_curvature_relaxed, max_curvature_relaxed - small_curvature),
         # no longer requiring the command to wind towards meas doesn't stop rate limiting it winding away
-        (winds_down_within_jerk, max_curvature_allowed_can / self.DEG_TO_CAN, max_curvature_relaxed),
+        (True, max_curvature_allowed_can / self.DEG_TO_CAN, max_curvature_relaxed),
       ])
 
       for sign in (-1, 1):
@@ -476,20 +531,40 @@ class TestFordSafetyBase(common.CarSafetyTest):
       self.assertTrue(self._tx(self._lat_ctl_msg(True, 0, 0, 0, 0, increment_timer=False)))
 
   def test_angle_mode_corroboration_gate(self):
-    """LMC/LMC2 with the angle-mode sentinel (desired_curvature == 0) must be corroborated by
-    Lane_Assist_Data1's angle_mode_engaged bit -- a mismatch (sentinel says angle mode, the
-    independently-signaled flag disagrees) must block.
+    """The wide angle-mode path_angle range (FORD_DBC_PATH_ANGLE_MIN/MAX, the full DBC range) must
+    be unlocked only by Lane_Assist_Data1's angle_mode_engaged bit. The angle-mode sentinel on its
+    own -- desired_curvature == 0 -- must not be enough: in curvature mode path_angle keeps the
+    tight FORD_PATH_ANGLE_MIN/MAX cap, so a frame cannot claim the wide range just by zeroing
+    curvature.
 
-    path_angle is held at a small nonzero value throughout (not 0) so the pre-existing
-    "reset detected" bypass latch (desired_curvature == 0 && desired_path_angle == 0) -- meant for
-    the human-turn/standstill ramp-up scenario -- doesn't mask this check's own result."""
+    Note this asserts the corroboration that ford.h actually implements. It deliberately does NOT
+    assert that every curvature == 0 frame is blocked when angle_mode_engaged is clear: 0 is the
+    inactive curvature sentinel, so that would forbid openpilot from commanding straight ahead in
+    ordinary curvature mode."""
+    self.safety.set_controls_allowed(True)
+    # outside FORD_PATH_ANGLE_MAX (0.25), inside FORD_DBC_PATH_ANGLE_MAX (0.5235)
+    wide_path_angle = 0.4
+    for speed in (5.0, 15.0):
+      for angle_mode_engaged in (True, False):
+        self._reset_curvature_measurement(0, speed)
+        self._tx(self._lka_bp_status_msg(angle_mode_engaged, 0.0))
+        # settle path_angle's own rate limiter; only the value range is under test here
+        self._tx(self._lat_ctl_msg(True, 0, wide_path_angle, 0, 0))
+        self.safety.set_controls_allowed(True)
+        with self.subTest(speed=speed, angle_mode_engaged=angle_mode_engaged):
+          self.assertEqual(angle_mode_engaged, self._tx(self._lat_ctl_msg(True, 0, wide_path_angle, 0, 0)))
+
+  def test_angle_mode_sentinel_keeps_tight_path_angle_cap(self):
+    """Sanity companion to test_angle_mode_corroboration_gate: with angle mode NOT corroborated, a
+    curvature == 0 frame is still perfectly legal inside the tight path_angle cap."""
     self.safety.set_controls_allowed(True)
     for speed in (5.0, 15.0):
       self._reset_curvature_measurement(0, speed)
-      for angle_mode_engaged in (True, False):
-        self._tx(self._lka_bp_status_msg(angle_mode_engaged, 0.0))
-        with self.subTest(speed=speed, angle_mode_engaged=angle_mode_engaged):
-          self.assertEqual(angle_mode_engaged, self._tx(self._lat_ctl_msg(True, 0, 0.01, 0, 0)))
+      self._tx(self._lka_bp_status_msg(False, 0.0))
+      self._tx(self._lat_ctl_msg(True, 0, 0.01, 0, 0))
+      self.safety.set_controls_allowed(True)
+      with self.subTest(speed=speed):
+        self.assertTrue(self._tx(self._lat_ctl_msg(True, 0, 0.01, 0, 0)))
 
   def test_curvature_mode_unaffected_by_angle_mode_flag(self):
     """Real (nonzero) curvature commands are self-evidently curvature mode by their own content --
@@ -529,7 +604,7 @@ class TestFordSafetyBase(common.CarSafetyTest):
     (path_angle_cmd_checks) applies in angle mode. A large frame-to-frame jump in shadow_curvature,
     while it stays within deviation tolerance of a correspondingly-updated measured curvature, must
     not block. Regression test for a real bug: substituting shadow_curvature into
-    steer_angle_cmd_checks (which does both ROC and deviation) caused spurious blocks from
+    the full curvature check (which does both ROC and deviation) caused spurious blocks from
     shadow_curvature's own frame-to-frame movement, unrelated to path_angle's actual behavior.
     path_angle held at a small nonzero value -- see test_angle_mode_corroboration_gate docstring."""
     self.safety.set_controls_allowed(True)
@@ -722,6 +797,9 @@ class TestFordPinionCurvatureSafetyBase(TestFordSafetyBase):
     angle_rad = curvature * self.PINION_STEER_RATIO / curvature_factor
     return float(np.degrees(angle_rad))
 
+  def _meas_tol_can(self, speed):
+    return self._pinion_quant_tol(speed)
+
   def _pinion_quant_tol(self, speed: float) -> int:
     # 0.1 deg DBC quantization -> curvature CAN units at this speed (+2 for float rounding)
     speed = max(speed, 0.1)
@@ -742,18 +820,11 @@ class TestFordPinionCurvatureSafetyBase(TestFordSafetyBase):
     # re-syncs, which would otherwise leave stale samples in the 6-deep angle_meas buffer
     for _ in range(14):
       self._rx(self._speed_msg(speed))
+      # the second speed source must be kept in sync too -- steer_curvature_cmd_checks runs
+      # speed_mismatch_check on every lateral tx, and a stale vehicle_speed_2 drops
+      # controls_allowed, which would block every command this helper is setting up for
+      self._rx(self._speed_msg_2(speed))
       self._rx(self._pinion_msg(curvature, speed))
-
-  def _drain_reset_bypass_latch(self, curvature):
-    # ford.h arms a 60-frame bypass latch whenever a curvature==0 && path_angle==0 frame is
-    # sent (human-turn ramp-up support). Prior tests commonly end on zeroed commands, so the
-    # latch may be live. Drain it with >60 nonzero-curvature frames (each decrements it),
-    # keeping the command at the measured curvature so nothing else violates meanwhile.
-    self.safety.set_controls_allowed(True)
-    for _ in range(70):
-      self._set_prev_desired_angle(curvature)
-      self._tx(self._lat_ctl_msg(True, 0, 0, curvature, 0))
-      self.safety.set_controls_allowed(True)
 
   def test_rx_hook(self):
     # checksum, counter, and quality flag checks (stock matrix + the pinion message)
@@ -826,7 +897,7 @@ class TestFordPinionCurvatureSafetyBase(TestFordSafetyBase):
     for sign in (1, -1):
       with self.subTest(sign=sign):
         self._reset_curvature_measurement(sign * curvature, speed)
-        self._drain_reset_bypass_latch(sign * curvature)
+        self.safety.set_controls_allowed(True)
         self._set_prev_desired_angle(sign * curvature)
         # matching-sign command: allowed
         self.assertTrue(self._tx(self._lat_ctl_msg(True, 0, 0, sign * curvature, 0)))
