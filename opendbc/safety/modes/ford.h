@@ -281,6 +281,16 @@ static bool test = false;
 // confirmed angle-mode frame, since commanded curvature is pinned at 0 while the car turns).
 // Feeding shadow_curvature into an equivalent check when angle mode is confirmed engaged restores
 // that protection.
+// BluePilot: reset bypass latch. Restored to match BluePilot's shipping bp-dev behavior at the
+// user's explicit request. A frame with curvature == 0 && path_angle == 0 clears the accumulated
+// violation and arms a ~3 s window in which following frames are also let through, so the PSCM
+// ramp-up after a human-turn reset is never blocked.
+//
+// NOTE: this clears the ENTIRE violation accumulator, which includes the
+// `steer_control_enabled && !(controls_allowed || controls_allowed_lateral)` gate. That is
+// BluePilot's shipping behavior, not an accident of this restore.
+static uint8_t reset_bypass_latch_counter = 0;
+static const uint8_t RESET_BYPASS_LATCH_DURATION = 60;  // ~3.0 seconds at 20Hz
 static bool ford_bp_angle_mode_engaged = false;
 static int16_t ford_bp_shadow_curvature_raw = 0;  // wire units, scale 1e-6 1/m (see fordcan_ext.py)
 
@@ -692,6 +702,18 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
       FORD_SAFETY_DBG("CAN Out: 4. desired_curvature_rate violation: %d\n", (int)violation);
     }
 
+    // Reset latch: activate when both curvature and path_angle are zero (reset/neutral state)
+    // This allows smooth ramp-up after human turn detection without blocked messages
+    if ((desired_curvature == 0) && (desired_path_angle == 0)) {
+      // Reset detected, activate latch for ramp period
+      reset_bypass_latch_counter = RESET_BYPASS_LATCH_DURATION;
+      violation = false;  // Immediate bypass for reset state
+    } else if (reset_bypass_latch_counter > 0) {
+      // Latch active, allow bypass during ramp-up period
+      reset_bypass_latch_counter--;
+      violation = false;
+    }
+
     if (violation) {
       tx = false;
     }
@@ -812,6 +834,18 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     violation |= curvature_rate_cmd_checks(desired_curvature_rate, steer_control_enabled, FORD_CURVATURE_RATE_LIMITS_CANFD);
     if (test) {
       FORD_SAFETY_DBG("CANFD Out: 4. desired_curvature_rate violation: %d\n", (int)violation);
+    }
+
+    // Reset latch: activate when both curvature and path_angle are zero (reset/neutral state)
+    // This allows smooth ramp-up after human turn detection without blocked messages
+    if ((desired_curvature == 0) && (desired_path_angle == 0)) {
+      // Reset detected, activate latch for ramp period
+      reset_bypass_latch_counter = RESET_BYPASS_LATCH_DURATION;
+      violation = false;  // Immediate bypass for reset state
+    } else if (reset_bypass_latch_counter > 0) {
+      // Latch active, allow bypass during ramp-up period
+      reset_bypass_latch_counter--;
+      violation = false;
     }
 
     if (violation) {
