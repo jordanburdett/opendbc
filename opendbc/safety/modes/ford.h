@@ -219,6 +219,10 @@ static const AngleSteeringLimits FORD_CURVATURE_RATE_LIMITS_CANFD = {
 
 static const CurvatureSteeringLimits FORD_STEERING_LIMITS = FORD_LIMITS(false, 100);
 static const CurvatureSteeringLimits FORD_STEERING_LIMITS_PINION = FORD_LIMITS(false, 150);
+// BluePilot: confirmed angle mode waives ONLY the commanded-vs-measured error band
+// (max_curvature_error = 0 disables it, see lateral.h) -- the band is enforced against
+// shadow_curvature instead. Every other limit is identical to the sets above.
+static const CurvatureSteeringLimits FORD_STEERING_LIMITS_ANGLE_MODE = FORD_LIMITS(false, 0);
 
 // BluePilot: per-platform geometry for pinion-angle -> curvature conversion (the optional
 // angle_meas source), selected by the 4-bit geometry index in current_safety_param_sp
@@ -255,14 +259,16 @@ static const AngleSteeringParams *ford_bp_pinion_params = &ford_pinion_geometry[
 
 static int desired_path_angle_last = 0;
 
-// Reset latch: allows bypass for a short period after reset (both curvature and path_angle = 0)
-// This enables smooth ramp-up after human turn detection without blocked messages
-// Latch activates when reset detected, stays active for ~3 seconds (60 frames at 20Hz)
-// Prevents exploitation by requiring reset state first and having a timeout
-// BluePilot: openpilot must send curvature_rate ~= 0 during reset and keep apply_curvature_last
-// aligned with the prior TX (see carcontroller BP path); else curvature_rate_cmd_checks can trip.
-static uint8_t reset_bypass_latch_counter = 0;
-static const uint8_t RESET_BYPASS_LATCH_DURATION = 60;  // ~3.0 seconds at 20Hz
+// BluePilot: a "reset bypass latch" used to live here. Any LMC/LMC2 frame with curvature == 0 and
+// path_angle == 0 cleared `violation` outright and armed a 60-frame (~3 s) window in which EVERY
+// subsequent frame's violations were also cleared -- absolute value limits, rate limits, the
+// shadow-curvature deviation check and the controls_allowed gate alike. openpilot sends a
+// zero/zero frame routinely (straight driving, the human-turn reset), so the bypass was live
+// essentially all the time and Ford lateral safety was inoperative. Removed; see the report.
+// The ramp-up case it was meant to serve is already handled: desired_path_angle_last,
+// desired_path_offset_last and desired_curvature_rate_last are re-baselined to the attempted value
+// every frame, and steer_curvature_cmd_checks resets curvature_state.desired_last to 0 on a
+// violation, so a hard reset to zero costs at most a single blocked frame.
 static bool test = false;
 
 // BluePilot: angle_mode_engaged + shadow_curvature, read synchronously out of Lane_Assist_Data1's
@@ -271,14 +277,15 @@ static bool test = false;
 // 2026-07-09). shadow_curvature is the curvature (kappa) that angle mode's path_angle was derived
 // from (see lateral_angle_ext.py's bp_kappa_cmd) -- angle mode holds the real curvature signal at
 // the inactive sentinel (0) on the wire, so without this there is no commanded-vs-measured
-// deviation check for angle mode at all (steer_angle_cmd_checks below is only enforced when
-// desired_curvature != 0). Feeding shadow_curvature into that same check when angle mode is
-// confirmed engaged restores that protection.
+// deviation check for angle mode at all (steer_curvature_cmd_checks' error band is waived on a
+// confirmed angle-mode frame, since commanded curvature is pinned at 0 while the car turns).
+// Feeding shadow_curvature into an equivalent check when angle mode is confirmed engaged restores
+// that protection.
 static bool ford_bp_angle_mode_engaged = false;
 static int16_t ford_bp_shadow_curvature_raw = 0;  // wire units, scale 1e-6 1/m (see fordcan_ext.py)
 
-// shadow_curvature is packed at scale 1e-6 1/m; convert to the CAN units steer_angle_cmd_checks
-// expects, matching FORD_STEERING_LIMITS/FORD_CANFD_STEERING_LIMITS.angle_deg_to_can (50000, i.e.
+// shadow_curvature is packed at scale 1e-6 1/m; convert to the CAN units the curvature checks
+// expect, matching FORD_STEERING_LIMITS/FORD_CANFD_STEERING_LIMITS.curvature_to_can (50000, i.e.
 // physical scale 2e-5): raw * 1e-6 * 50000 = raw * 0.05.
 #define FORD_BP_SHADOW_CURVATURE_TO_CAN(raw) ((int)((float)(raw) * 0.05f))
 
@@ -381,12 +388,12 @@ static bool curvature_rate_cmd_checks(int desired_curvature_rate, bool steer_con
 // curvature -- e.g. a pothole or driver override kicking the wheel -- would go unchecked: path_angle's
 // own ROC only bounds how fast the *command* changes, not how far it may sit from reality.
 //
-// Deliberately narrower than steer_angle_cmd_checks: no rate-of-change enforcement here, and no
-// shared state (desired_angle_last) with curvature mode. path_angle already has its own dedicated,
+// Deliberately narrower than steer_curvature_cmd_checks: no rate-of-change enforcement here, and
+// no shared state (curvature_state.desired_last) with curvature mode. path_angle already has its own dedicated,
 // tuned ROC (path_angle_cmd_checks / FORD_PATH_ANGLE_LIMITS); imposing a second, curvature-tuned ROC
 // on shadow_curvature -- which isn't an actuator, just a cross-check value -- would risk spurious
 // blocks unrelated to path_angle's actual behavior (confirmed on real hardware 2026-07-10: doing
-// this via steer_angle_cmd_checks caused blocks at low speed from shadow_curvature jumping frame to
+// this via the full curvature check caused blocks at low speed from shadow_curvature jumping frame to
 // frame with nothing driving it toward path_angle's own smooth ROC). This is a pure per-frame
 // proximity check: does this frame's steering intent make physical sense given where the car is.
 // BluePilot: enforce_angle_error is gone from the struct; the check is unconditional now because
@@ -619,7 +626,7 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     // corroborated by ford_bp_angle_mode_engaged (read from Lane_Assist_Data1, see above) so a
     // frame can't unlock this wider range by merely setting curvature to 0. Curvature mode (the
     // default; matches pre-angle-mode bp-6.0 behavior byte for byte) always keeps the tight 0.25
-    // cap, including at curvature == 0 (straight driving, or the reset/human-turn frame below) --
+    // cap, including at curvature == 0 (straight driving, or a human-turn reset frame) --
     // path_angle there only trims and amplifies wound-up curvature, never needs the wide range.
     float path_angle_min_phys = ford_bp_angle_mode_engaged ? FORD_DBC_PATH_ANGLE_MIN : FORD_PATH_ANGLE_MIN;
     float path_angle_max_phys = ford_bp_angle_mode_engaged ? FORD_DBC_PATH_ANGLE_MAX : FORD_PATH_ANGLE_MAX;
@@ -633,23 +640,23 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     }
 
     // Check angle error and steer_control_enabled for curvature
-    // BluePilot: bp-6.0 (pre-angle-mode) applied steer_angle_cmd_checks's result unconditionally.
-    // Angle mode holds curvature pinned at 0 while path_angle does the real steering, so the
-    // deviation-vs-measured portion of that check would eventually trip as the car actually turns
-    // (measured curvature moves, commanded curvature doesn't) -- skip applying it when
-    // desired_curvature == 0. Still call it to keep desired_angle_last in sync, and path_angle
-    // keeps its own checks regardless. But steer_angle_cmd_checks also carries the
-    // controls_allowed gate bp-6.0 relied on for every frame; restore that piece explicitly so a
-    // steer_control_enabled frame at curvature == 0 can't bypass it (see LMC2 block below).
     // BluePilot: the pinion-sourced angle_meas variant carries a wider error band (150 vs 100) --
     // see the FORD_LIMITS macro comment. Everything else in the two limit sets is identical.
-    const CurvatureSteeringLimits *ford_lmc_limits = ford_bp_pinion_curvature ? &FORD_STEERING_LIMITS_PINION : &FORD_STEERING_LIMITS;
-    bool curvature_violation = steer_curvature_cmd_checks(desired_curvature, 0, steer_control_enabled, *ford_lmc_limits);
-    if (desired_curvature != 0) {
-      violation |= curvature_violation;
-    } else {
-      violation |= steer_control_enabled && !(controls_allowed || controls_allowed_lateral);
-    }
+    //
+    // Angle mode holds curvature pinned at the inactive sentinel (0) while path_angle does the real
+    // steering, so the commanded-vs-measured error band would drift and trip as the car actually
+    // turns. Waive ONLY that band in confirmed angle mode; ford_shadow_curvature_error_check below
+    // enforces the equivalent bound against the curvature path_angle was actually derived from.
+    // Everything else steer_curvature_cmd_checks carries -- the absolute curvature cap, the
+    // rate-of-change limit, the lateral acceleration cap and the real-time send-rate limit -- plus
+    // its controls_allowed gate, still applies at curvature == 0. This used to discard the entire
+    // result whenever desired_curvature == 0, which disabled rt_curvature_rate_limit_check for
+    // every angle-mode frame (curvature is always 0 there) and for every zero-curvature frame in
+    // curvature mode.
+    const CurvatureSteeringLimits ford_lmc_limits = ford_bp_pinion_curvature ? FORD_STEERING_LIMITS_PINION : FORD_STEERING_LIMITS;
+    const bool ford_angle_mode_frame = (desired_curvature == 0) && ford_bp_angle_mode_engaged;
+    violation |= steer_curvature_cmd_checks(desired_curvature, 0, steer_control_enabled,
+                                            ford_angle_mode_frame ? FORD_STEERING_LIMITS_ANGLE_MODE : ford_lmc_limits);
     // End BluePilot
     if (test) {
       FORD_SAFETY_DBG("CAN Out: 1. desired_curvature violation: %d\n", (int)violation);
@@ -659,11 +666,12 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     // already rate-limits the real actuator) against shadow_curvature, once angle mode is confirmed
     // engaged via Lane_Assist_Data1 (see ford_bp_angle_mode_engaged above). If desired_curvature == 0
     // but angle mode is NOT confirmed, this is skipped -- that's ordinary curvature mode at zero
-    // (straight driving or the reset/human-turn frame below), which needs no shadow-curvature check;
-    // it's still bounded by the tight path_angle range above and steer_control_enabled's own checks.
+    // (straight driving or a human-turn reset frame), which needs no shadow-curvature check; it is
+    // still bounded by the tight path_angle range above, by the full commanded-vs-measured error
+    // band (only confirmed angle mode waives that), and by steer_control_enabled's own checks.
     if ((desired_curvature == 0) && ford_bp_angle_mode_engaged) {
       int shadow_curvature_can = FORD_BP_SHADOW_CURVATURE_TO_CAN(ford_bp_shadow_curvature_raw);
-      violation |= ford_shadow_curvature_error_check(shadow_curvature_can, steer_control_enabled, *ford_lmc_limits);
+      violation |= ford_shadow_curvature_error_check(shadow_curvature_can, steer_control_enabled, ford_lmc_limits);
     }
 
     // Check path angle rate of change limits
@@ -684,18 +692,6 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
       FORD_SAFETY_DBG("CAN Out: 4. desired_curvature_rate violation: %d\n", (int)violation);
     }
 
-    // Reset latch: activate when both curvature and path_angle are zero (reset/neutral state)
-    // This allows smooth ramp-up after human turn detection without blocked messages
-    if ((desired_curvature == 0) && (desired_path_angle == 0)) {
-      // Reset detected, activate latch for ramp period
-      reset_bypass_latch_counter = RESET_BYPASS_LATCH_DURATION;
-      violation = false;  // Immediate bypass for reset state
-    } else if (reset_bypass_latch_counter > 0) {
-      // Latch active, allow bypass during ramp-up period
-      reset_bypass_latch_counter--;
-      violation = false;
-    }
-
     if (violation) {
       tx = false;
     }
@@ -705,8 +701,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
   if (msg->addr == FORD_LateralMotionControl2) {
     static const CurvatureSteeringLimits FORD_CANFD_STEERING_LIMITS = FORD_LIMITS(true, 100);
     static const CurvatureSteeringLimits FORD_CANFD_STEERING_LIMITS_PINION = FORD_LIMITS(true, 150);
+    // BluePilot: see FORD_STEERING_LIMITS_ANGLE_MODE.
+    static const CurvatureSteeringLimits FORD_CANFD_STEERING_LIMITS_ANGLE_MODE = FORD_LIMITS(true, 0);
     // BluePilot: see the CAN handler's ford_lmc_limits comment.
-    const CurvatureSteeringLimits *ford_lmc2_limits = ford_bp_pinion_curvature ? &FORD_CANFD_STEERING_LIMITS_PINION : &FORD_CANFD_STEERING_LIMITS;
+    const CurvatureSteeringLimits ford_lmc2_limits = ford_bp_pinion_curvature ? FORD_CANFD_STEERING_LIMITS_PINION : FORD_CANFD_STEERING_LIMITS;
 
     // Signal: LatCtl_D2_Rq
     bool steer_control_enabled = ((msg->data[0] >> 4) & 0x7U) != 0U;
@@ -762,7 +760,7 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     // corroborated by ford_bp_angle_mode_engaged (read from Lane_Assist_Data1, see above) so a
     // frame can't unlock this wider range by merely setting curvature to 0. Curvature mode (the
     // default; matches pre-angle-mode bp-6.0 behavior byte for byte) always keeps the tight 0.25
-    // cap, including at curvature == 0 (straight driving, or the reset/human-turn frame below) --
+    // cap, including at curvature == 0 (straight driving, or a human-turn reset frame) --
     // path_angle there only trims and amplifies wound-up curvature, never needs the wide range.
     float path_angle_min_phys = ford_bp_angle_mode_engaged ? FORD_DBC_PATH_ANGLE_MIN : FORD_PATH_ANGLE_MIN;
     float path_angle_max_phys = ford_bp_angle_mode_engaged ? FORD_DBC_PATH_ANGLE_MAX : FORD_PATH_ANGLE_MAX;
@@ -775,21 +773,12 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
                       desired_path_angle, path_angle_min_can, path_angle_max_can, (int)violation);
     }
 
-    // Check angle error and steer_control_enabled for curvature
-    // BluePilot: bp-6.0 (pre-angle-mode) applied steer_angle_cmd_checks's result unconditionally.
-    // Angle mode holds curvature pinned at 0 while path_angle does the real steering, so the
-    // deviation-vs-measured portion of that check would eventually trip as the car actually turns
-    // (measured curvature moves, commanded curvature doesn't) -- skip applying it when
-    // desired_curvature == 0. Still call it to keep desired_angle_last in sync, and path_angle
-    // keeps its own checks regardless. But steer_angle_cmd_checks also carries the
-    // controls_allowed gate bp-6.0 relied on for every frame; restore that piece explicitly so a
-    // steer_control_enabled frame at curvature == 0 can't bypass it.
-    bool curvature_violation = steer_curvature_cmd_checks(desired_curvature, 0, steer_control_enabled, *ford_lmc2_limits);
-    if (desired_curvature != 0) {
-      violation |= curvature_violation;
-    } else {
-      violation |= steer_control_enabled && !(controls_allowed || controls_allowed_lateral);
-    }
+    // Check angle error and steer_control_enabled for curvature.
+    // BluePilot: see the CAN handler's ford_lmc_limits comment -- only the commanded-vs-measured
+    // error band is waived in confirmed angle mode, never the rest of the check.
+    const bool ford_angle_mode_frame = (desired_curvature == 0) && ford_bp_angle_mode_engaged;
+    violation |= steer_curvature_cmd_checks(desired_curvature, 0, steer_control_enabled,
+                                            ford_angle_mode_frame ? FORD_CANFD_STEERING_LIMITS_ANGLE_MODE : ford_lmc2_limits);
     // End BluePilot
     if (test) {
       FORD_SAFETY_DBG("CANFD Out: 1. desired_curvature violation: %d\n", (int)violation);
@@ -799,11 +788,12 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     // already rate-limits the real actuator) against shadow_curvature, once angle mode is confirmed
     // engaged via Lane_Assist_Data1 (see ford_bp_angle_mode_engaged above). If desired_curvature == 0
     // but angle mode is NOT confirmed, this is skipped -- that's ordinary curvature mode at zero
-    // (straight driving or the reset/human-turn frame below), which needs no shadow-curvature check;
-    // it's still bounded by the tight path_angle range above and steer_control_enabled's own checks.
+    // (straight driving or a human-turn reset frame), which needs no shadow-curvature check; it is
+    // still bounded by the tight path_angle range above, by the full commanded-vs-measured error
+    // band (only confirmed angle mode waives that), and by steer_control_enabled's own checks.
     if ((desired_curvature == 0) && ford_bp_angle_mode_engaged) {
       int shadow_curvature_can = FORD_BP_SHADOW_CURVATURE_TO_CAN(ford_bp_shadow_curvature_raw);
-      violation |= ford_shadow_curvature_error_check(shadow_curvature_can, steer_control_enabled, *ford_lmc2_limits);
+      violation |= ford_shadow_curvature_error_check(shadow_curvature_can, steer_control_enabled, ford_lmc2_limits);
     }
 
     // Check path angle rate of change limits
@@ -822,18 +812,6 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     violation |= curvature_rate_cmd_checks(desired_curvature_rate, steer_control_enabled, FORD_CURVATURE_RATE_LIMITS_CANFD);
     if (test) {
       FORD_SAFETY_DBG("CANFD Out: 4. desired_curvature_rate violation: %d\n", (int)violation);
-    }
-
-    // Reset latch: activate when both curvature and path_angle are zero (reset/neutral state)
-    // This allows smooth ramp-up after human turn detection without blocked messages
-    if ((desired_curvature == 0) && (desired_path_angle == 0)) {
-      // Reset detected, activate latch for ramp period
-      reset_bypass_latch_counter = RESET_BYPASS_LATCH_DURATION;
-      violation = false;  // Immediate bypass for reset state
-    } else if (reset_bypass_latch_counter > 0) {
-      // Latch active, allow bypass during ramp-up period
-      reset_bypass_latch_counter--;
-      violation = false;
     }
 
     if (violation) {
@@ -948,6 +926,17 @@ static safety_config ford_init(uint16_t param) {
   }
   ford_bp_pinion_curvature = pinion_enabled;
   ford_bp_pinion_params = pinion_enabled ? &ford_pinion_geometry[pinion_geometry_index] : &ford_pinion_geometry[0];
+
+  // BluePilot: clear the mode's own lateral state on every init. These are file statics that
+  // otherwise survive a safety-mode change. ford_bp_angle_mode_engaged is the worst of them: it
+  // latches the wide FORD_DBC_PATH_ANGLE range and the shadow-curvature path, and only a fresh
+  // Lane_Assist_Data1 TX can clear it -- so a stale "angle mode engaged" could carry across an
+  // init into a session where openpilot is in curvature mode.
+  desired_path_angle_last = 0;
+  desired_path_offset_last = 0;
+  desired_curvature_rate_last = 0;
+  ford_bp_angle_mode_engaged = false;
+  ford_bp_shadow_curvature_raw = 0;
 
   // BluePilot: upstream replaced this runtime selection with a compile-time #ifdef ALLOW_DEBUG
   // gate. Not adopted -- BluePilot keeps the ford_longitudinal runtime path above so the CAN FD
