@@ -8,7 +8,7 @@ Includes:
   - HEV flag auto-detection from fingerprint CAN IDs
   - Alpha longitudinal availability policy (always True for all Ford platforms)
   - DELPHI_MRR_64 radar delay configuration
-  - Tuning overrides (steerActuatorDelay, longitudinalTuning.kpV)
+  - Tuning overrides (steerActuatorDelay)
   - ICBM (Intelligent Cruise Button Management) availability
 """
 
@@ -34,7 +34,10 @@ def apply_ford_ext_params(ret: structs.CarParams, CP, car_fw, fingerprint, alpha
 
   # BluePilot: tuning overrides
   ret.steerActuatorDelay = 0.22  # upstream: 0.2
-  ret.longitudinalTuning.kpV = [0.]
+  # BluePilot zeroed the longitudinal proportional gain here. Upstream deprecated kp outright
+  # (opendbc c536b211 "deprecate long kp"): kpBP/kpV moved into longitudinalTuning.deprecated and
+  # the PID no longer has a proportional term at all, so setting it raises. Dropping the line
+  # keeps the intended behavior -- no proportional contribution -- and every brand now sets only ki.
 
   # BluePilot: DELPHI_MRR_64 radar support
   candidate = ret.carFingerprint
