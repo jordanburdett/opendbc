@@ -72,6 +72,9 @@ class EnumBase(Enum):
 
 class Mount(EnumBase):
   mount = BasePart("mount")
+  # BluePilot: comma 3X angled mount. Upstream dropped the 3X from car docs when it moved to
+  # documenting the comma four only (commaai/opendbc 45fac347); BluePilot still targets 3X/C3X.
+  angled_mount_8_degrees = BasePart("angled mount (8 degrees)")
 
 
 class Cable(EnumBase):
@@ -79,6 +82,8 @@ class Cable(EnumBase):
   usb_a_2_a_cable = BasePart("USB A-A cable")
   usbc_otg_cable = BasePart("USB C OTG cable")
   obd_c_cable_2ft = BasePart("OBD-C cable (2 ft)")
+  # BluePilot: 3X cable, removed upstream alongside the 3X device entries
+  right_angle_obd_c_cable_1_5ft = BasePart("right angle OBD-C cable (1.5 ft)")
 
 
 class Accessory(EnumBase):
@@ -151,6 +156,12 @@ class CarHarness(EnumBase):
 
 class Device(EnumBase):
   four = BasePart("comma four", parts=[Mount.mount, Cable.obd_c_cable_2ft])
+  # BluePilot: restored 3X entries. apply_bp_device_mount() in
+  # opendbc/sunnypilot/car/ford/values_ext.py selects between these per platform; without them it
+  # raises AttributeError and takes out the whole car-docs generator (test_car_list).
+  threex = BasePart("comma 3X", parts=[Mount.mount, Cable.right_angle_obd_c_cable_1_5ft])
+  # variant of comma 3X with angled mounts
+  threex_angled_mount = BasePart("comma 3X", parts=[Mount.angled_mount_8_degrees, Cable.right_angle_obd_c_cable_1_5ft])
 
 
 class PartType(Enum):

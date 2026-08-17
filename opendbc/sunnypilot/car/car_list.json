@@ -524,18 +524,13 @@
     ],
     "package": "Co-Pilot360 Assist+"
   },
-  "Ford Edge 2019-24": {
+  "Ford Edge 2022": {
     "platform": "FORD_EDGE_MK2",
     "make": "Ford",
     "brand": "ford",
     "model": "Edge",
     "year": [
-      "2019",
-      "2020",
-      "2021",
-      "2022",
-      "2023",
-      "2024"
+      "2022"
     ],
     "package": "Co-Pilot360 Assist+"
   },
@@ -672,14 +667,16 @@
     ],
     "package": "Co-Pilot360 Assist 2.0"
   },
-  "Ford F-150 Lightning 2022-23": {
+  "Ford F-150 Lightning 2022-25": {
     "platform": "FORD_F_150_LIGHTNING_MK1",
     "make": "Ford",
     "brand": "ford",
     "model": "F-150 Lightning",
     "year": [
       "2022",
-      "2023"
+      "2023",
+      "2024",
+      "2025"
     ],
     "package": "Co-Pilot360 Assist 2.0"
   },
@@ -816,18 +813,8 @@
     "platform": "FORD_MONDEO_MK5",
     "make": "Ford",
     "brand": "ford",
-    "model": "Mondeo",
-    "year": [
-      "2014",
-      "2015",
-      "2016",
-      "2017",
-      "2018",
-      "2019",
-      "2020",
-      "2021",
-      "2022"
-    ],
+    "model": "Mondeo 2014-2022",
+    "year": [],
     "package": "Adaptive Cruise Control with Lane Centering"
   },
   "Ford Mustang Mach-E 2021-24": {
