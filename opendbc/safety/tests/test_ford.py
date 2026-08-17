@@ -794,28 +794,28 @@ class TestFordPinionCurvatureSafetyBase(TestFordSafetyBase):
           self._rx(self._pinion_msg(c, speed))
 
         quant_tol = self._pinion_quant_tol(speed)
-        self.assertAlmostEqual(self.safety.get_angle_meas_min(), round(-curvature * self.DEG_TO_CAN), delta=quant_tol)
-        self.assertAlmostEqual(self.safety.get_angle_meas_max(), round(curvature * self.DEG_TO_CAN), delta=quant_tol)
+        self.assertAlmostEqual(self.safety.get_curvature_meas_min(), round(-curvature * self.DEG_TO_CAN), delta=quant_tol)
+        self.assertAlmostEqual(self.safety.get_curvature_meas_max(), round(curvature * self.DEG_TO_CAN), delta=quant_tol)
 
         self._rx(self._pinion_msg(0, speed))
-        self.assertAlmostEqual(self.safety.get_angle_meas_min(), round(-curvature * self.DEG_TO_CAN), delta=quant_tol)
-        self.assertAlmostEqual(self.safety.get_angle_meas_max(), 0, delta=quant_tol)
+        self.assertAlmostEqual(self.safety.get_curvature_meas_min(), round(-curvature * self.DEG_TO_CAN), delta=quant_tol)
+        self.assertAlmostEqual(self.safety.get_curvature_meas_max(), 0, delta=quant_tol)
 
         self._rx(self._pinion_msg(0, speed))
-        self.assertAlmostEqual(self.safety.get_angle_meas_min(), 0, delta=quant_tol)
-        self.assertAlmostEqual(self.safety.get_angle_meas_max(), 0, delta=quant_tol)
+        self.assertAlmostEqual(self.safety.get_curvature_meas_min(), 0, delta=quant_tol)
+        self.assertAlmostEqual(self.safety.get_curvature_meas_max(), 0, delta=quant_tol)
 
   def test_pinion_quality_flag_gates_measurement(self):
     """A bad pinion quality flag must reject the message (measurement not updated)."""
     speed = self.CURVATURE_ERROR_MIN_SPEED + 5
     self._reset_curvature_measurement(0.005, speed)
-    meas_max_before = self.safety.get_angle_meas_max()
+    meas_max_before = self.safety.get_curvature_meas_max()
     self.assertGreater(meas_max_before, 0)
 
     # bad-QF frames must be rejected at rx and leave angle_meas untouched
     for _ in range(6):
       self.assertFalse(self._rx(self._pinion_msg(0, speed, quality_flag=False)))
-    self.assertEqual(self.safety.get_angle_meas_max(), meas_max_before)
+    self.assertEqual(self.safety.get_curvature_meas_max(), meas_max_before)
 
   def test_pinion_sign_convention(self):
     """Command matching the measured curvature sign passes the error check; a sign-inverted
