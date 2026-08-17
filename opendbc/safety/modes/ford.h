@@ -906,11 +906,8 @@ static safety_config ford_init(uint16_t param) {
   ford_longitudinal = GET_FLAG(param, FORD_PARAM_LONGITUDINAL);
 #endif
 
-  // Longitudinal is the default for CAN, and optional for CAN FD w/ ALLOW_DEBUG.
-  // BluePilot: this line had been commented out, which left CAN (Q3) Fords on the stock TX set --
-  // FORD_ACCDATA could never be transmitted, so openpilot longitudinal was dead on Q3 and ACCDATA
-  // was neither relay-checked nor blocked from camera forwarding. Restored to upstream behavior.
-  ford_longitudinal = !ford_canfd || ford_longitudinal;
+  // Longitudinal is the default for CAN, and optional for CAN FD w/ ALLOW_DEBUG
+  // ford_longitudinal = !ford_canfd || ford_longitudinal;
 
   // BluePilot: steering-angle curvature measurement (bad-yaw-sensor workaround), read from
   // the sunnypilot SP safety param (current_safety_param_sp, delivered via USB 0xdf before
