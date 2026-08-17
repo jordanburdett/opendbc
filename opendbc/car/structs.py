@@ -166,3 +166,80 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+
+
+# BluePilot: ControllerStateBP for lateral uncertainty (angleState vehicles)
+@auto_dataclass
+class ControllerStateBP:
+  lateralUncertainty: float = 0.0
+  angleRateLimited: bool = False       # angle mode: path_angle soft-ROC clip bit this frame
+  curvatureRateLimited: bool = False   # sim: equivalent curvature would be rate-limited by lateral_curv_ext
+  curvatureDeviationLimited: bool = False  # current_curvature error-clip constrained the command this frame
+  humanTurnLateralPaused: bool = False  # angle mode: lateral forced inactive (mode 0) during a manual turn
+  stallBlipActive: bool = False  # angle mode: brief mode-0 pulse resetting PSCM authority after a post-override stall
+
+  # BluePilot: full BluePilot-menu settings snapshot -- see custom.capnp ControllerStateBP for
+  # field-by-field param-key mapping and the field-retirement convention.
+  # --- System ---
+  bmsUiDebugLogging: bool = False
+  bmsConnectBackend: int = 0
+  bmsWebRoutesServerEnabled: bool = False
+  bmsPreferredWifiNetwork: str = ""
+  # --- Vehicle ---
+  bmsShowBlueCruiseUiOnCluster: bool = False
+  bmsTwelveVBatteryLimit: float = 11.8
+  # --- Visuals ---
+  bmsHideOnroadBorder: bool = False
+  bmsDisableLaneLineStatusColor: bool = False
+  bmsMinimalDrivingView: bool = False
+  bmsEightBitRacerTheme: bool = False
+  bmsRainbowLaneLines: bool = False
+  bmsShowBlindspotOverlay: bool = True
+  bmsShowBrakeStatus: bool = False
+  bmsShowConfidenceBall: bool = True
+  bmsAnimateSteeringWheel: bool = True
+  bmsWheelIconStyle: int = 0
+  bmsShowRadarLeadOverlay: bool = True
+  bmsRadarOverlaySize: int = 1
+  bmsShowHybridBatteryStatus: bool = False
+  bmsShowHybridPowerFlow: bool = False
+  bmsHybridDriveGaugeSize: int = 1
+  bmsHybridGaugeStyle: int = 0
+  bmsHybridPowerFlowStyleRound: bool = False
+  bmsLowerRightDisplay: int = 0
+  bmsRainbowMode: bool = False
+  bmsHideOnroadFade: bool = False
+  # --- Longitudinal Tuning ---
+  bmsBypassBpLongitudinalControl: bool = False
+  bmsDisableDownhillCompensation: bool = False
+  bmsDisableFordRadarVisionOnly: bool = False
+  # --- Lateral Tuning ---
+  bmsDisableBpLateralControl: bool = False
+  bmsPrimaryControlVariable: int = 0
+  bmsDisableLaneChangeUnderSpeed: bool = False
+  bmsMinimumSpeedToPauseLaneChange: int = 20
+  bmsShowLateralControlMode: bool = False
+  # --- Angle Tuning ---
+  bmsLowSpeedAdjustmentFactor: float = 1.0
+  bmsHighSpeedAdjustmentFactor: float = 1.0
+  bmsLaneChangeFactorHighAngle: float = 1.0
+  # --- Curvature Tuning ---
+  bmsEnableHumanTurnDetection: bool = True
+  bmsLaneChangeFactorHighCurvature: float = 0.85
+  bmsEnableLanePositioning: bool = False
+  bmsInLaneOffset: float = 0.0
+  bmsEnableLanefullMode: bool = False
+  bmsUseCustomTuningProfile: bool = False
+  bmsPredictedCurvatureBlendRatioHigh: float = 0.4
+  bmsPredictedCurvatureBlendRatioLow: float = 0.4
+  bmsCenteringPidGain: float = 3.0
+  # --- Fingerprint ---
+  bmsFingerprintForced: bool = False
+  bmsFingerprint: str = ""
+  # --- Lateral mode the car controller actually ran (not the param) ---
+  activeLateralMode: 'ControllerStateBP.LateralMode' = field(default_factory=lambda: ControllerStateBP.LateralMode.openpilot)
+
+  class LateralMode(StrEnum):
+    openpilot = auto()  # BP lateral bypassed
+    curvature = auto()
+    angle = auto()

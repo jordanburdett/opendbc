@@ -1,6 +1,28 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <time.h>
+#include <sys/time.h>
+
+// BluePilot: Ford safety debug → stdout for replay (FORD_SAFETY_DBG defaults to no-op in declarations.h)
+static void ford_safety_dbg(const char *fmt, ...) {
+  struct timeval tv;
+  struct tm tm_buf;
+  (void)gettimeofday(&tv, NULL);
+  (void)localtime_r(&tv.tv_sec, &tm_buf);
+  const int ms = (int)(tv.tv_usec / 1000);
+  printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] ", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+         tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+  va_list ap;
+  va_start(ap, fmt);
+  (void)vprintf(fmt, ap);
+  va_end(ap);
+  fflush(stdout);
+}
+
+#define FORD_SAFETY_DBG(...) ford_safety_dbg(__VA_ARGS__)
+// End BluePilot
 
 // TODO: time should just be passed into the hooks we expose
 uint32_t timer_cnt = 0;
@@ -40,14 +62,6 @@ void set_controls_allowed(bool c){
 
 void set_alternative_experience(int mode){
   alternative_experience = mode;
-}
-
-void mads_apply_alternative_experience(int mode){
-  mads_set_alternative_experience(&mode);
-}
-
-void tick_mads_state(bool vm, bool acc_main, bool op_allowed, bool braking, bool steering_disengage){
-  mads_state_update(vm, acc_main, op_allowed, braking, steering_disengage);
 }
 
 void set_relay_malfunction(bool c){
@@ -265,6 +279,28 @@ uint16_t get_current_safety_param_sp(void){
   return current_safety_param_sp;
 }
 
+// BluePilot: debug getters for the Ford pinion geometry table (ALLOW_DEBUG builds only).
+// Consumed by test_ford.py's geometry-consistency test, which compares every firmware row
+// against CarSpecs + calc_slip_factor(VehicleModel(CP)) so the table cannot rot as
+// platforms change -- without fragile header parsing.
+#ifdef ALLOW_DEBUG
+int get_ford_pinion_geometry_count(void){
+  return (int)FORD_PINION_GEOMETRY_COUNT;
+}
+
+float get_ford_pinion_geometry_slip_factor(int idx){
+  return ((idx >= 0) && (idx <= (int)FORD_PINION_GEOMETRY_COUNT)) ? ford_pinion_geometry[idx].slip_factor : 0.0f;
+}
+
+float get_ford_pinion_geometry_steer_ratio(int idx){
+  return ((idx >= 0) && (idx <= (int)FORD_PINION_GEOMETRY_COUNT)) ? ford_pinion_geometry[idx].steer_ratio : 0.0f;
+}
+
+float get_ford_pinion_geometry_wheelbase(int idx){
+  return ((idx >= 0) && (idx <= (int)FORD_PINION_GEOMETRY_COUNT)) ? ford_pinion_geometry[idx].wheelbase : 0.0f;
+}
+#endif
+
 void set_mads_button_press(int c){
   mads_button_press = c;
 }
@@ -291,6 +327,14 @@ void mads_set_current_disengage_reason(int reason) {
 
 void set_controls_requested_lateral(bool c){
   m_mads_state.controls_requested_lateral = c;
+}
+
+void mads_apply_alternative_experience(int mode){
+  mads_set_alternative_experience(&mode);
+}
+
+void tick_mads_state(bool vm, bool acc_main, bool op_allowed, bool braking, bool steering_disengage){
+  mads_state_update(vm, acc_main, op_allowed, braking, steering_disengage);
 }
 
 void set_mads_params(bool enable_mads, bool disengage_lateral_on_brake, bool pause_lateral_on_brake){

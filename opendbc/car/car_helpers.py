@@ -86,7 +86,22 @@ def can_fingerprint(can_recv: CanRecvCallable) -> tuple[str | None, dict[int, di
 def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback,
                 cached_params: CarParamsT | None,
                 fixed_fingerprint: str | None) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
-  fixed_fingerprint = fixed_fingerprint or os.environ.get('FINGERPRINT', "")
+  # BluePilot: read params directly as a redundant safety net for forced fingerprints,
+  # so we don't rely solely on what card.py passes in.
+  # Imported lazily: opendbc must stay importable standalone (it is a submodule with its own
+  # CI), so it cannot depend on openpilot at module scope.
+  try:
+    from openpilot.common.params import Params
+  except ImportError:
+    Params = None
+  platform_from_selector = None
+  if Params is not None:
+    platform_from_selector = (Params().get("CarPlatformBundle") or {}).get("platform", None)
+  if platform_from_selector:
+    carlog.warning("BluePilot forced fingerprint from CarPlatformBundle: %s", platform_from_selector)
+    fixed_fingerprint = platform_from_selector
+  else:
+    fixed_fingerprint = fixed_fingerprint or os.environ.get('FINGERPRINT', "")
   skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
   ecu_rx_addrs = set()
@@ -158,7 +173,11 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
                                                                           fixed_fingerprint)
 
   if candidate is None:
-    carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
+    # BluePilot: include vin so a "no fingerprint" report is actually actionable — without it we
+    # can't tell a VIN-query failure (vin == VIN_UNKNOWN, i.e. "0"*17) from a case where the VIN
+    # was read fine but nothing (VIN-based or CAN/FW) matched it.
+    carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints), "vin": vin})
+    # End BluePilot
     candidate = "MOCK"
 
   CarInterface = interfaces[candidate]
