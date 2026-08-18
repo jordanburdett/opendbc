@@ -14,7 +14,7 @@ FORD_STOCK_ANGLE_LIMITS = AngleSteeringLimits(
   ([5, 25], [0.00045, 0.0001]),
   ([5, 25], [0.00045, 0.00015]),
 )
-from opendbc.car.docs_definitions import CarFootnote, CarHarness, CarDocs, CarParts, Column
+from opendbc.car.docs_definitions import CarFootnote, CarHarness, CarDocs, Column
 from opendbc.car.fw_query_definitions import FwQueryConfig, LiveFwVersions, OfflineFwVersions, Request, StdQueries, p16
 from opendbc.car.vin import Vin, is_valid_vin
 

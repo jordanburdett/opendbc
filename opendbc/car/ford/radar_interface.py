@@ -207,7 +207,6 @@ class RadarInterface(RadarInterfaceBase):
         if (abs(vRel) < 1.0e-2):
           self.vRelCol[0].append(dDiff)
           vRel = sum(self.vRelCol[0])
-          calc = 1
         else:
           if len(self.vRelCol[0]) > 0:
             self.vRelCol[0].clear()

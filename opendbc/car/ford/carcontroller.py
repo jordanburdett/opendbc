@@ -116,7 +116,6 @@ class CarController(CarControllerBase, LateralCurvExt, LateralAngleExt, Longitud
     actuators = CC.actuators
     hud_control = CC.hudControl
     main_on = CS.out.cruiseState.available
-    steer_alert = hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw)
     fcw_alert = hud_control.visualAlert == VisualAlert.fcw
 
     # BluePilot: compute DM state (TJA message, warning, hands level)

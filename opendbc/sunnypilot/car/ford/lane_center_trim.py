@@ -194,7 +194,8 @@ class LaneCenterTrim:
       # probability via min() -- a single missing/unreliable line (e.g. no line on the curb
       # side, only a center stripe) drags confidence toward 0 on its own.
       width_tolerance = float(np.interp(width, _WIDTH_TOLERANCE_BP, _WIDTH_TOLERANCE_V))
-      std_tolerance = float(np.interp(max(float(stds[1]), float(stds[2])), _STD_TOLERANCE_BP, _STD_TOLERANCE_V)) #StarPilot stopped at 0.3, this fades the std through the table
+      # StarPilot stopped at 0.3; this fades the std through the table instead
+      std_tolerance = float(np.interp(max(float(stds[1]), float(stds[2])), _STD_TOLERANCE_BP, _STD_TOLERANCE_V))
       confidence = min(float(probs[1]), float(probs[2]), width_tolerance, std_tolerance) #confidence is the weakest signal
       scale = float(np.clip(np.interp(confidence, _CONFIDENCE_BP, _CONFIDENCE_V), 0.0, 1.0))
       center_y = 0.5 * (left + right)

@@ -13,7 +13,6 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.can.parser import CANParser
 from opendbc.car.ford.values import CAR, FordFlags
 from opendbc.sunnypilot.car.ford.values_ext import BUTTONS
-from openpilot.common.swaglog import cloudlog
 
 
 # BluePilot: HEV power flow mode text lookup (moved from helpers.py)

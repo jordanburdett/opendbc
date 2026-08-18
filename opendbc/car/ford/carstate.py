@@ -54,7 +54,7 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
         and cp.vl["ParkAid_Data"]["ApaSys_D_Stat"] in (0, 1)
       )
     else:
-   	  # Occasionally on startup, the ABS module recalibrates the steering pinion offset, so we need to block engagement
+       # Occasionally on startup, the ABS module recalibrates the steering pinion offset, so we need to block engagement
       # The vehicle usually recovers out of this state within a minute of normal driving
       ret.vehicleSensorsInvalid = cp.vl["SteeringPinion_Data"]["StePinCompAnEst_D_Qf"] != 3
 

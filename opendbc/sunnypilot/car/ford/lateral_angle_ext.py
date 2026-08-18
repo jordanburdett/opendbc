@@ -244,15 +244,17 @@ class LateralAngleExt:
 
   def update_angle_strategy(self, CC, CS, actuators, CP):
     """
-    Curvature from planner (+ optional predicted blend, + lane centering trim) → path_angle via
-    ½·κ·d_ref. c0 (path_offset) is always zero on the wire; the lane centering trim lives entirely
+    Curvature from planner (+ optional predicted blend, + lane centering trim) → path_angle.
+    NOTE: the conversion is the empirical speed/curvature gain schedule below
+    (path_angle = kappa_cmd * v_ego * curvature_factor), NOT the ½·κ·d_ref relation those gains
+    were originally derived from -- see pscm_d_ref_m, which is kept only as documentation of
+    that origin. c0 (path_offset) is always zero on the wire; the lane centering trim lives entirely
     in the curvature domain (kappa_cmd), not on c0. c2 and c3 are zero.
     Blended κ is not passed through Ford c2 rate / DBC limits (those target the curvature actuator).
     """
     self._ensure_lateral_curv_initialized(CP)
 
     v_ego = float(CS.out.vEgoRaw)
-    d_ref = pscm_d_ref_m(v_ego)
 
     curvature_rate = 0.0
     path_offset = 0.0
@@ -390,7 +392,6 @@ class LateralAngleExt:
 
     self.precision_type = 1
     precision = 1
-    LP = self.lp
     desired_curvature = float(actuators.curvature)
 
     # Variable lookup time: t_base tracks planner pre-compensation; extra tapers on high speed and large curves.
@@ -504,8 +505,6 @@ class LateralAngleExt:
 
     lateral_uncertainty = 0.0  # no curvature-limit ladder until angle-mode torque display is defined
 
-
-
     # Speed-interpolated gain: at low speed both curves use 1.0; at high speed the params take effect.
     self.low_gain_calc = interp(
       v_ego, [13.5, 26.82], [1.0, (self.path_angle_gain_lowC_highV * self.user_dampening_factor)]
@@ -517,7 +516,6 @@ class LateralAngleExt:
 
     path_angle_calc = kappa_cmd * v_ego * self.curvature_factor
     path_angle = path_angle_calc
-
 
     # PSCM authority limit clamp.
     # On CANFD Fords in angle mode, LatCtlLim_D_Stat does not fire, so _pscm_lim stays 0.
@@ -556,7 +554,6 @@ class LateralAngleExt:
                             self.path_angle_last + _soft_roc))
     # BluePilot: did the soft ROC clip actually limit the path_angle we wanted to send this frame?
     self.bp_angle_rate_limited = bool(abs(path_angle - _path_angle_pre_roc) > 1e-9)
-
 
     # c0 always zero -- no centering trim in angle mode.
     path_offset = 0.0
@@ -612,7 +609,6 @@ class LateralAngleExt:
         self.stall_blip_count = 0  # episode over: the car is tracking again or the driver took it
 
     ramp_type = 2
-
 
     return LateralResult(
       apply_curvature=0.0,

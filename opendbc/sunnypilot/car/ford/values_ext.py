@@ -122,4 +122,3 @@ def apply_bp_device_mount(car_docs, CP):
     car_docs.car_parts = CarParts([Device.threex_angled_mount, harness])
   else:
     car_docs.car_parts = CarParts([Device.threex, harness])
-
