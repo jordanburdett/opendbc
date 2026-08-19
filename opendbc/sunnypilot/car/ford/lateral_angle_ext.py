@@ -32,6 +32,9 @@ resumed. Mode 0 is panda-clean by construction: every ford.h check has a legitim
 back in from zero through the soft ROC below (no jump seed) -- generous at human-turn speeds, and
 admitted by ford.h's path_angle ROC check (2% looser) without any bypass.
 """
+import json
+import time
+
 import numpy as np
 from numpy import clip, interp
 
@@ -82,6 +85,8 @@ _FORD_PATH_ANGLE_BLEND_RATIO_DEFAULT = 0.50
 # Extra lookahead collapses toward zero at high speed (PSCM responds faster)
 # and at large curvature (prevents blend importing a "start unwinding" signal too early).
 _DT_MDL = 0.05                       # model loop period (matches common/realtime.py)
+_LEARNED_READ_INTERVAL = 5.0         # s between re-reads of the learned-delta blob
+_MAX_LEARNED_DELTA = 0.15            # hard bound on what fordlatd may add to the user value
 _VLT_T_BASE_MAX  = 0.15              # upper clamp on lateralDelay when forming t_base
 _VLT_T_EXTRA_MAX = 0.10              # max extra lookahead above t_base
 _VLT_V_LOW_MS   = 25.0 * 0.44704    # 25 mph — full extra lookahead at or below this speed
@@ -146,6 +151,11 @@ class LateralAngleExt:
     self.vlt_extra_max = _VLT_T_EXTRA_MAX
     # Upper clamp on lateralDelay when forming t_base; from ``FordVLTBaseMax`` param
     self.vlt_base_max = _VLT_T_BASE_MAX
+    # Learned deltas from bluepilot/selfdrive/fordlatd.py, applied on top of the user's
+    # setting. Cached because update_angle_params runs every frame and this needs a JSON parse.
+    self._learned_hi = 0.0
+    self._learned_lo = 0.0
+    self._learned_read_t = -1e9
     # Telemetry: final path_angle (rad) after limits (see bp_card_publisher)
     self.bp_path_angle_final = 0.0
     # High-speed gain factors: set per-platform via carFingerprint in update_angle_params.
@@ -228,6 +238,28 @@ class LateralAngleExt:
               float(raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw), min_value, max_value)))
         except Exception:
           pass
+      # BluePilot: continuous learning. The user's factors above are the anchor; fordlatd only
+      # stores a bounded delta against them, and applies nothing unless the toggle is on. Read on
+      # an interval rather than every frame -- this is a JSON parse, and the value moves at most
+      # once every few minutes.
+      try:
+        now = time.monotonic()
+        if now - self._learned_read_t >= _LEARNED_READ_INTERVAL:
+          self._learned_read_t = now
+          self._learned_hi = self._learned_lo = 0.0
+          if params.get_bool("FordAngleLearningEnabled"):
+            raw = params.get("FordAngleLearned", return_default=True)
+            if raw:
+              blob = json.loads(raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw)
+              bands = blob.get("bands", {})
+              self._learned_hi = float(clip(bands.get("high", {}).get("delta", 0.0), -_MAX_LEARNED_DELTA, _MAX_LEARNED_DELTA))
+              self._learned_lo = float(clip(bands.get("low", {}).get("delta", 0.0), -_MAX_LEARNED_DELTA, _MAX_LEARNED_DELTA))
+      except Exception:
+        self._learned_hi = self._learned_lo = 0.0
+      if self._learned_hi or self._learned_lo:
+        self.high_speed_curv_factor = float(clip(self.high_speed_curv_factor + self._learned_hi, 0.5, 1.5))
+        self.low_speed_curv_factor = float(clip(self.low_speed_curv_factor + self._learned_lo, 0.5, 1.5))
+
       try:
         raw = params.get("lane_change_factor_high_ang", return_default=True)
         if raw is not None and raw != b"":
