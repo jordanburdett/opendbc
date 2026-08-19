@@ -210,6 +210,12 @@ class LateralAngleExt:
         ("low_speed_curv_factor", "FordLowSpeedFactor_ang", 0.5, 1.5),
         ("high_speed_curv_factor", "FordHighSpeedFactor_ang", 0.5, 1.5),
         ("user_dampening_factor", "FordHighSpeedDampening_ang", 0.25, 1.25),
+        # These two were documented as params in the module docstring and in __init__ but were
+        # never actually read -- FordPathAngleBlendRatio and FordVLTExtraMax existed only in
+        # comments, so the blend ratio and extra lookahead were hardcoded constants. Defaults
+        # below equal the previous constants, so behaviour is unchanged until they are set.
+        ("path_angle_blend_ratio", "FordPathAngleBlendRatio", 0.0, 1.0),
+        ("vlt_extra_max", "FordVLTExtraMax", 0.0, 0.30),
       ):
         try:
           raw = params.get(key, return_default=True)
