@@ -82,6 +82,7 @@ _FORD_PATH_ANGLE_BLEND_RATIO_DEFAULT = 0.50
 # Extra lookahead collapses toward zero at high speed (PSCM responds faster)
 # and at large curvature (prevents blend importing a "start unwinding" signal too early).
 _DT_MDL = 0.05                       # model loop period (matches common/realtime.py)
+_VLT_T_BASE_MAX  = 0.15              # upper clamp on lateralDelay when forming t_base
 _VLT_T_EXTRA_MAX = 0.10              # max extra lookahead above t_base
 _VLT_V_LOW_MS   = 25.0 * 0.44704    # 25 mph — full extra lookahead at or below this speed
 _VLT_V_HIGH_MS  = 55.0 * 0.44704    # 55 mph — no extra lookahead at or above this speed
@@ -143,6 +144,8 @@ class LateralAngleExt:
     self.path_angle_blend_ratio = _FORD_PATH_ANGLE_BLEND_RATIO_DEFAULT
     # Max extra VLT above t_base; from ``FordVLTExtraMax`` param
     self.vlt_extra_max = _VLT_T_EXTRA_MAX
+    # Upper clamp on lateralDelay when forming t_base; from ``FordVLTBaseMax`` param
+    self.vlt_base_max = _VLT_T_BASE_MAX
     # Telemetry: final path_angle (rad) after limits (see bp_card_publisher)
     self.bp_path_angle_final = 0.0
     # High-speed gain factors: set per-platform via carFingerprint in update_angle_params.
@@ -216,6 +219,7 @@ class LateralAngleExt:
         # below equal the previous constants, so behaviour is unchanged until they are set.
         ("path_angle_blend_ratio", "FordPathAngleBlendRatio", 0.0, 1.0),
         ("vlt_extra_max", "FordVLTExtraMax", 0.0, 0.30),
+        ("vlt_base_max", "FordVLTBaseMax", 0.10, 0.45),
       ):
         try:
           raw = params.get(key, return_default=True)
@@ -401,12 +405,22 @@ class LateralAngleExt:
     desired_curvature = float(actuators.curvature)
 
     # Variable lookup time: t_base tracks planner pre-compensation; extra tapers on high speed and large curves.
-    # Cap lateralDelay at 0.15s for VLT purposes. lateralDelay can calibrate up to ~420ms on some runs, which inflates
-    # VLT to 0.6s and pushes the model lookahead 5m into the curve. At that depth the model sees full peak
-    # curvature, kappa_entering stays True, and the exit-biased blend is permanently disabled — causing the car
-    # to command max path_angle through the entire apex. 0.15s gives t_base ≤ 0.20s and VLT ≤ 0.33s, restoring
-    # the 2.8m lookahead that kept kappa_entering False at the apex in successful earlier runs.
-    _t_base = float(clip(self.sm['lateralDelay'].lateralDelay, 0.1, 0.15)) + _DT_MDL
+    #
+    # The upper clamp used to be a hard 0.15 s. The stated reason was that a larger lookahead keeps
+    # kappa_entering True and so "permanently disables the exit-biased blend" -- but that blend is
+    # already unreachable in angle mode: it needs _desired_falling, i.e. d|kappa|/dt > 0.2 (1/m)/s,
+    # and real corner exits run 0.004-0.024 (1/m)/s, 8-55x below the threshold (and _pscm_lim never
+    # fires in angle mode either). So the clamp was costing phase lead to protect a mechanism that
+    # is off regardless.
+    #
+    # That matters on a car whose learned lateralDelay is well above the clamp. With delay 0.29 s,
+    # clamping to 0.15 gives t_base = 0.20 s and, at b = 0.5, only ~0.10 s of effective lead against
+    # a 0.29 s delay -- the command lags, the car under-turns, and raising the gain to compensate
+    # costs phase margin (overshoot, hunting) instead of fixing it.
+    #
+    # Now tunable via FordVLTBaseMax. Default 0.15 keeps the previous behaviour exactly; raise it
+    # toward the learned lateralDelay to add lead WITHOUT changing steady-state gain.
+    _t_base = float(clip(self.sm['lateralDelay'].lateralDelay, 0.1, self.vlt_base_max)) + _DT_MDL
     _speed_factor = float(interp(v_ego, [_VLT_V_LOW_MS, _VLT_V_HIGH_MS], [1.0, 0.0]))
     # Direction-aware kappa factor: on curve ENTRY (model shows more curvature at t_base than planner now),
     # keep full lookahead so pre-steering begins early. On exit/apex, taper by magnitude to prevent unwind.
